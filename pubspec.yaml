@@ -1,0 +1,13 @@
+name: hz_studio
+description: Generateur de frequences audio pour Android et Windows.
+publish_to: none
+version: 1.0.0+1
+environment:
+  sdk: '>=3.6.0 <4.0.0'
+dependencies:
+  flutter:
+    sdk: flutter
+  audioplayers: ^6.8.1
+  path_provider: ^2.1.5
+flutter:
+  uses-material-design: true
