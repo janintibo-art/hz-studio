@@ -20,12 +20,22 @@ jobs:
           cache: true
       - name: Generate Android platform
         run: flutter create --platforms=android --project-name hz_studio .
-      - name: Set Android compile SDK 36
+      - name: Set Android app compile SDK 36
         run: |
           grep -q 'compileSdk = flutter.compileSdkVersion' android/app/build.gradle.kts
           sed -i 's/compileSdk = flutter.compileSdkVersion/compileSdk = 36/' android/app/build.gradle.kts
           grep -q 'compileSdk = 36' android/app/build.gradle.kts
       - run: flutter pub get
+      - name: Fix file_picker plugin compile SDK 36
+        shell: bash
+        run: |
+          plugin_gradle=$(find "$HOME/.pub-cache/hosted/pub.dev" -maxdepth 3 -path '*/file_picker-*/android/build.gradle' -print -quit)
+          if [ -z "$plugin_gradle" ]; then echo 'file_picker Android Gradle file not found'; exit 1; fi
+          echo "Patching: $plugin_gradle"
+          grep -n 'compileSdk' "$plugin_gradle"
+          sed -i -E 's/compileSdk[[:space:]]+34/compileSdk 36/' "$plugin_gradle"
+          grep -Eq 'compileSdk[[:space:]]+36' "$plugin_gradle" || { echo 'compileSdk 36 not set'; exit 1; }
+          grep -n 'compileSdk' "$plugin_gradle"
       - run: flutter analyze --no-fatal-infos
       - run: flutter test
       - run: flutter build apk --release
