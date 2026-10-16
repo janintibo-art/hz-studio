@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:isolate';
 import 'dart:math' as math;
@@ -85,6 +86,13 @@ class _StudioPageState extends State<StudioPage> {
   String? _error;
   String? _filename;
   PcmAudio? _imported;
+  Uint8List? _processedWav;
+  Duration _position = Duration.zero;
+  Duration _duration = Duration.zero;
+  bool _paused = false;
+  late final StreamSubscription<Duration> _positionSubscription;
+  late final StreamSubscription<Duration> _durationSubscription;
+  late final StreamSubscription<void> _completeSubscription;
   int _generation = 0;
   final List<File> _tempFiles = [];
 
@@ -102,8 +110,29 @@ class _StudioPageState extends State<StudioPage> {
   ];
 
   @override
+  void initState() {
+    super.initState();
+    _positionSubscription = _player.onPositionChanged.listen((value) {
+      if (mounted) setState(() => _position = value);
+    });
+    _durationSubscription = _player.onDurationChanged.listen((value) {
+      if (mounted) setState(() => _duration = value);
+    });
+    _completeSubscription = _player.onPlayerComplete.listen((_) {
+      if (mounted) setState(() {
+        _playing = false;
+        _paused = false;
+        _position = Duration.zero;
+      });
+    });
+  }
+
+  @override
   void dispose() {
     _generation++;
+    _positionSubscription.cancel();
+    _durationSubscription.cancel();
+    _completeSubscription.cancel();
     _player.dispose();
     _frequency.dispose();
     _reference.dispose();
@@ -125,7 +154,51 @@ class _StudioPageState extends State<StudioPage> {
       await _player.stop();
     } catch (_) {}
     if (mounted) {
-      setState(() => _playing = false);
+      setState(() {
+        _playing = false;
+        _paused = false;
+        _position = Duration.zero;
+      });
+    }
+  }
+
+  Future<void> _togglePause() async {
+    if (!_playing) return;
+    try {
+      if (_paused) {
+        await _player.resume();
+      } else {
+        await _player.pause();
+      }
+      if (mounted) setState(() => _paused = !_paused);
+    } catch (e) {
+      if (mounted) setState(() => _error = 'Pause impossible : $e');
+    }
+  }
+
+  String _clock(Duration value) {
+    final seconds = value.inSeconds.clamp(0, 86400);
+    return '${(seconds ~/ 60).toString().padLeft(2, '0')}:${(seconds % 60).toString().padLeft(2, '0')}';
+  }
+
+  Future<void> _saveProcessed() async {
+    final data = _processedWav;
+    if (data == null) return;
+    try {
+      final target = await FilePicker.platform.saveFile(
+        dialogTitle: 'Exporter l’extrait transformé',
+        fileName: 'hz_studio_accordage.wav',
+        type: FileType.custom,
+        allowedExtensions: ['wav'],
+        bytes: data,
+      );
+      if (target != null && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Extrait WAV exporté.')),
+        );
+      }
+    } catch (e) {
+      if (mounted) setState(() => _error = 'Export impossible : $e');
     }
   }
 
@@ -141,6 +214,11 @@ class _StudioPageState extends State<StudioPage> {
   Future<void> _playBytes(Uint8List wav, {bool loop = false}) async {
     final gen = ++_generation;
     await _player.stop();
+    if (mounted) setState(() {
+      _position = Duration.zero;
+      _duration = Duration.zero;
+      _paused = false;
+    });
     final dir = await getTemporaryDirectory();
     final file = File(
       '${dir.path}/hzstudio_${DateTime.now().microsecondsSinceEpoch}.wav',
@@ -283,6 +361,7 @@ class _StudioPageState extends State<StudioPage> {
         setState(() {
           _imported = pcm;
           _filename = selected.name;
+          _processedWav = null;
           _error = null;
         });
       }
@@ -332,7 +411,10 @@ class _StudioPageState extends State<StudioPage> {
         () => shiftPitch(pcm.samples, ratio, pcm.sampleRate),
       );
       final wav = await Isolate.run(() => encodePcmWav(audio, pcm.sampleRate));
-      if (mounted) await _playBytes(wav);
+      if (mounted) {
+        setState(() => _processedWav = wav);
+        await _playBytes(wav);
+      }
     } catch (e) {
       if (mounted) setState(() => _error = 'Traitement impossible : $e');
     } finally {
@@ -648,6 +730,44 @@ class _StudioPageState extends State<StudioPage> {
         title: 'APERÇU DU FICHIER',
       ),
       const SizedBox(height: 18),
+      _sectionPanel(
+        title: 'TRANSPORT AUDIO',
+        icon: Icons.play_circle_outline,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Slider(
+              value: _duration.inMilliseconds > 0
+                  ? (_position.inMilliseconds / _duration.inMilliseconds).clamp(0.0, 1.0)
+                  : 0.0,
+              onChanged: _playing && _duration.inMilliseconds > 0
+                  ? (value) => _player.seek(Duration(
+                      milliseconds: (_duration.inMilliseconds * value).round()))
+                  : null,
+            ),
+            Row(children: [
+              Text(_clock(_position)),
+              const Spacer(),
+              Text(_clock(_duration)),
+            ]),
+            const SizedBox(height: 10),
+            Row(children: [
+              Expanded(child: OutlinedButton.icon(
+                onPressed: _playing ? _togglePause : null,
+                icon: Icon(_paused ? Icons.play_arrow : Icons.pause),
+                label: Text(_paused ? 'REPRENDRE' : 'PAUSE'),
+              )),
+              const SizedBox(width: 10),
+              Expanded(child: OutlinedButton.icon(
+                onPressed: _playing ? _stop : null,
+                icon: const Icon(Icons.stop),
+                label: const Text('STOP'),
+              )),
+            ]),
+          ],
+        ),
+      ),
+      const SizedBox(height: 18),
       _statGrid([
         _statCard('Source', _reference.text, Icons.music_note),
         _statCard('Cible', _target.text, Icons.swap_horiz),
@@ -670,6 +790,7 @@ class _StudioPageState extends State<StudioPage> {
                       labelText: 'Source',
                       prefixIcon: Icon(Icons.call_made),
                     ),
+                    onChanged: (_) => setState(() => _processedWav = null),
                   ),
                 ),
                 const Padding(
@@ -686,6 +807,7 @@ class _StudioPageState extends State<StudioPage> {
                       labelText: 'Cible',
                       prefixIcon: Icon(Icons.call_received),
                     ),
+                    onChanged: (_) => setState(() => _processedWav = null),
                   ),
                 ),
               ],
@@ -700,7 +822,7 @@ class _StudioPageState extends State<StudioPage> {
                   onPressed: () {
                     _reference.text = '440';
                     _target.text = '432';
-                    setState(() {});
+                    setState(() => _processedWav = null);
                   },
                 ),
                 ActionChip(
@@ -708,7 +830,7 @@ class _StudioPageState extends State<StudioPage> {
                   onPressed: () {
                     _reference.text = '432';
                     _target.text = '440';
-                    setState(() {});
+                    setState(() => _processedWav = null);
                   },
                 ),
                 ActionChip(
@@ -735,12 +857,21 @@ class _StudioPageState extends State<StudioPage> {
                 ),
               ),
             ),
+            const SizedBox(height: 10),
+            SizedBox(
+              width: double.infinity,
+              child: OutlinedButton.icon(
+                onPressed: _processedWav == null || _busy ? null : _saveProcessed,
+                icon: const Icon(Icons.save_alt),
+                label: const Text('EXPORTER L’EXTRAIT EN WAV'),
+              ),
+            ),
           ],
         ),
       ),
       const SizedBox(height: 18),
       _notePanel(
-        'V9 graphique : MP3, FLAC, OGG, Opus, WAV, M4A et autres formats selon le décodeur disponible. Aperçu limité à 20 secondes, converti en mono. La lecture intégrale, la stéréo et l’export viendront ensuite.',
+        'V10 : MP3, FLAC, OGG, Opus, WAV, M4A et autres formats selon le décodeur disponible. Traitement et export WAV limités aux 20 premières secondes, en mono. La lecture intégrale et la stéréo viendront ensuite.',
       ),
     ];
   }
