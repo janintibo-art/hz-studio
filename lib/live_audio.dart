@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'android_live_capture.dart';
 
 class LiveAudioPanel extends StatefulWidget {
   const LiveAudioPanel({super.key});
@@ -100,20 +101,8 @@ class _LiveAudioPanelState extends State<LiveAudioPanel> {
   @override
   Widget build(BuildContext context) {
     const cyan = Color(0xff70fff0);
-    if (!Platform.isWindows) {
-      return const Card(
-        child: Padding(
-          padding: EdgeInsets.all(24),
-          child: Column(children: [
-            Icon(Icons.smartphone, color: cyan, size: 44),
-            SizedBox(height: 14),
-            Text('LIVE AUDIO — WINDOWS', style: TextStyle(fontWeight: FontWeight.bold)),
-            SizedBox(height: 12),
-            Text('La capture audio des autres applications Android est limitée par le système et par chaque application. Cette fonction est pour le moment réservée au PC.', textAlign: TextAlign.center),
-          ]),
-        ),
-      );
-    }
+    if (Platform.isAndroid) return const AndroidLiveCapturePanel();
+    if (!Platform.isWindows) return const Center(child: Text('Plateforme non prise en charge'));
     return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
       const Text('LIVE AUDIO', style: TextStyle(fontSize: 25, fontWeight: FontWeight.w900, letterSpacing: 2)),
       const SizedBox(height: 8),

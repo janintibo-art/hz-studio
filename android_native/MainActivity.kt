@@ -4,6 +4,14 @@ import android.content.ContentValues
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
+import android.Manifest
+import android.content.pm.PackageManager
+import android.content.Intent
+import android.content.Context
+import android.media.projection.MediaProjectionManager
+import android.os.Build
+import android.app.Activity
+import io.flutter.plugin.common.MethodChannel.Result
 import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaFormat
@@ -18,8 +26,84 @@ import java.nio.ByteOrder
 import kotlin.concurrent.thread
 
 class MainActivity : FlutterActivity() {
+    private val captureRequestCode = 8342
+    private val audioPermissionCode = 8343
+    private var pendingCaptureResult: Result? = null
+
+    private fun requestScreenCaptureConsent() {
+        val manager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+        try {
+            startActivityForResult(manager.createScreenCaptureIntent(), captureRequestCode)
+        } catch (e: Exception) {
+            pendingCaptureResult?.error("CAPTURE", e.message, null)
+            pendingCaptureResult = null
+        }
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == audioPermissionCode) {
+            if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                requestScreenCaptureConsent()
+            } else {
+                pendingCaptureResult?.error("PERMISSION", "Permission audio refusée", null)
+                pendingCaptureResult = null
+            }
+        }
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != captureRequestCode) return
+        val pending = pendingCaptureResult
+        pendingCaptureResult = null
+        if (resultCode == Activity.RESULT_OK && data != null) {
+            try {
+                val service = Intent(this, AndroidLiveCaptureService::class.java).apply {
+                    action = AndroidLiveCaptureService.ACTION_START
+                    putExtra(AndroidLiveCaptureService.EXTRA_RESULT_CODE, resultCode)
+                    putExtra(AndroidLiveCaptureService.EXTRA_RESULT_DATA, data)
+                }
+                if (Build.VERSION.SDK_INT >= 26) startForegroundService(service) else startService(service)
+                pending?.success(true)
+            } catch (e: Exception) {
+                pending?.error("CAPTURE", e.message, null)
+            }
+        } else {
+            pending?.success(false)
+        }
+    }
+
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "hz_studio/android_live").setMethodCallHandler { call, result ->
+            when (call.method) {
+                "start" -> {
+                    if (Build.VERSION.SDK_INT < 29) {
+                        result.error("VERSION", "Android 10 minimum requis", null)
+                    } else if (pendingCaptureResult != null) {
+                        result.error("BUSY", "Autorisation déjà demandée", null)
+                    } else {
+                        pendingCaptureResult = result
+                        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+                            requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), audioPermissionCode)
+                        } else {
+                            requestScreenCaptureConsent()
+                        }
+                    }
+                }
+                "stop" -> {
+                    stopService(Intent(this, AndroidLiveCaptureService::class.java))
+                    result.success(true)
+                }
+                "status" -> result.success(mapOf(
+                    "running" to AndroidLiveCaptureService.running,
+                    "level" to AndroidLiveCaptureService.level,
+                    "message" to AndroidLiveCaptureService.status
+                ))
+                else -> result.notImplemented()
+            }
+        }
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "hz_studio/audio_decode")
             .setMethodCallHandler { call, result ->
                 val path = call.argument<String>("path")

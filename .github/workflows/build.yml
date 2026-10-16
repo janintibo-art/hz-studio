@@ -1,4 +1,4 @@
-name: HZ Studio - Android Windows Live Audio Release
+name: HZ Studio V13 - Android Capture et Windows Release
 on:
   push:
     tags: ['v*']
@@ -24,6 +24,20 @@ jobs:
         run: |
           mkdir -p android/app/src/main/kotlin/com/example/hz_studio
           cp android_native/MainActivity.kt android/app/src/main/kotlin/com/example/hz_studio/MainActivity.kt
+          cp android_native/AndroidLiveCaptureService.kt android/app/src/main/kotlin/com/example/hz_studio/AndroidLiveCaptureService.kt
+          python3 - <<'PYMANIFEST'
+          from pathlib import Path
+          manifest = Path('android/app/src/main/AndroidManifest.xml')
+          xml = manifest.read_text()
+          perms = '\n'.join(f'    <uses-permission android:name="{p}" />' for p in (
+              'android.permission.FOREGROUND_SERVICE',
+              'android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION',
+              'android.permission.RECORD_AUDIO',
+          ))
+          xml = xml.replace('<application', perms + '\n    <application', 1)
+          xml = xml.replace('</application>', '    <service android:name=".AndroidLiveCaptureService" android:exported="false" android:foregroundServiceType="mediaProjection" />\n    </application>', 1)
+          manifest.write_text(xml)
+          PYMANIFEST
       - name: Set Android app compile SDK 36
         run: |
           grep -q 'compileSdk = flutter.compileSdkVersion' android/app/build.gradle.kts
@@ -104,4 +118,4 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" dist/hz_studio_android.apk dist/hz_studio_windows.zip --title "HZ Studio ${GITHUB_REF_NAME}" --notes "Android et Windows. V12: prototype Windows Live Audio (sortie distincte obligatoire). Le traitement Live n'est pas disponible sur Android." --latest
+          gh release create "${GITHUB_REF_NAME}" dist/hz_studio_android.apk dist/hz_studio_windows.zip --title "HZ Studio ${GITHUB_REF_NAME}" --notes "Android et Windows. V12: prototype Windows Live Audio (sortie distincte obligatoire). V13 Android : diagnostic de capture des applications compatibles, sans traitement audio en direct." --latest
