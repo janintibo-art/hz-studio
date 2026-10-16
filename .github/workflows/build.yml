@@ -1,4 +1,4 @@
-name: HZ Studio - APK Windows et Release
+name: HZ Studio - V8 Multiformat et Release
 on:
   push:
     tags: ['v*']
@@ -20,6 +20,10 @@ jobs:
           cache: true
       - name: Generate Android platform
         run: flutter create --platforms=android --project-name hz_studio .
+      - name: Install Android native audio decoder
+        run: |
+          mkdir -p android/app/src/main/kotlin/com/example/hz_studio
+          cp android_native/MainActivity.kt android/app/src/main/kotlin/com/example/hz_studio/MainActivity.kt
       - name: Set Android app compile SDK 36
         run: |
           grep -q 'compileSdk = flutter.compileSdkVersion' android/app/build.gradle.kts
@@ -60,6 +64,16 @@ jobs:
       - run: flutter analyze --no-fatal-infos
       - run: flutter test
       - run: flutter build windows --release
+      - name: Download portable FFmpeg for Windows
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip' -OutFile ffmpeg-portable.zip
+          Expand-Archive -Path ffmpeg-portable.zip -DestinationPath ffmpeg-portable
+          $ffmpeg = Get-ChildItem -Path ffmpeg-portable -Filter ffmpeg.exe -Recurse | Select-Object -First 1
+          if (!$ffmpeg) { throw 'ffmpeg.exe not found in the portable distribution' }
+          Copy-Item $ffmpeg.FullName 'build/windows/x64/runner/Release/ffmpeg.exe'
+          $license = Get-ChildItem -Path ffmpeg-portable -Filter LICENSE -Recurse | Select-Object -First 1
+          if ($license) { Copy-Item $license.FullName 'build/windows/x64/runner/Release/FFMPEG-LICENSE.txt' }
       - name: Package EXE and dependencies
         shell: pwsh
         run: Compress-Archive -Path 'build/windows/x64/runner/Release/*' -DestinationPath 'hz_studio_windows.zip' -Force
@@ -83,4 +97,4 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" dist/hz_studio_android.apk dist/hz_studio_windows.zip --title "HZ Studio ${GITHUB_REF_NAME}" --notes "Android APK et Windows EXE (dans le ZIP avec ses DLL). Generateur de frequences et lecteur WAV experimental." --latest
+          gh release create "${GITHUB_REF_NAME}" dist/hz_studio_android.apk dist/hz_studio_windows.zip --title "HZ Studio ${GITHUB_REF_NAME}" --notes "Android APK et Windows EXE (dans le ZIP avec ses DLL). Generateur de frequences et lecteur multiformat en aperçu de 20 secondes. FFmpeg Windows embarque." --latest

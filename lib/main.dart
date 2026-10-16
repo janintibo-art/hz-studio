@@ -5,6 +5,7 @@ import 'dart:typed_data';
 import 'package:audioplayers/audioplayers.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 import 'audio_processing.dart';
 
@@ -98,24 +99,51 @@ class _StudioPageState extends State<StudioPage> {
     } catch (e) { if (mounted) setState(() => _error = 'Lecture impossible : $e'); }
     finally { if (mounted) setState(() => _busy = false); }
   }
-  Future<void> _importWav() async {
+  Future<Uint8List> _decodeSelectedAudio(String path) async {
+    if (Platform.isAndroid) {
+      const channel = MethodChannel('hz_studio/audio_decode');
+      final wavPath = await channel.invokeMethod<String>('decodePreview', {'path': path});
+      if (wavPath == null) throw const FormatException('Décodage Android indisponible.');
+      final file = File(wavPath);
+      try { return await file.readAsBytes(); } finally { try { await file.delete(); } catch (_) {} }
+    }
+    if (Platform.isWindows) {
+      final exe = File('${File(Platform.resolvedExecutable).parent.path}\\ffmpeg.exe');
+      if (!await exe.exists()) throw const FormatException('ffmpeg.exe absent du dossier Windows.');
+      final dir = await getTemporaryDirectory();
+      final output = File('${dir.path}\\hz_decode_${DateTime.now().microsecondsSinceEpoch}.wav');
+      try {
+        final process = await Process.run(exe.path, [
+          '-hide_banner', '-loglevel', 'error', '-nostdin', '-y', '-i', path,
+          '-t', '20', '-vn', '-ac', '1', '-ar', '44100', '-c:a', 'pcm_s16le', output.path,
+        ]);
+        if (process.exitCode != 0) throw FormatException('FFmpeg : ${process.stderr}');
+        return await output.readAsBytes();
+      } finally { if (await output.exists()) await output.delete(); }
+    }
+    throw const FormatException('Plateforme non prise en charge.');
+  }
+
+  Future<void> _importAudio() async {
     await _stop();
+    setState(() { _busy = true; _error = null; });
     try {
-      final pick = await FilePicker.platform.pickFiles(
-        type: FileType.custom, allowedExtensions: ['wav'], withData: true);
+      final pick = await FilePicker.platform.pickFiles(type: FileType.custom,
+        allowedExtensions: ['mp3', 'mp2', 'flac', 'ogg', 'opus', 'wav', 'aiff', 'aif', 'aac', 'm4a', 'wma', 'ape', 'wv', 'tta', 'ac3', 'mka'],
+        withData: false);
       if (pick == null || pick.files.isEmpty) return;
       final selected = pick.files.single;
-      if (selected.size > 35 * 1024 * 1024) throw const FormatException('Fichier supérieur à 35 Mo.');
-      final bytes = selected.bytes ?? (selected.path != null ? await File(selected.path!).readAsBytes() : null);
-      if (bytes == null) throw const FormatException('Lecture du fichier impossible.');
+      if (selected.path == null) throw const FormatException('Impossible de lire le chemin du fichier.');
+      final bytes = await _decodeSelectedAudio(selected.path!);
       final pcm = await Isolate.run(() => readPcmWav(bytes));
       if (mounted) setState(() { _imported = pcm; _filename = selected.name; _error = null; });
-    } catch (e) { if (mounted) setState(() => _error = '$e'); }
+    } catch (e) { if (mounted) setState(() => _error = 'Import impossible : $e'); }
+    finally { if (mounted) setState(() => _busy = false); }
   }
   Future<void> _playShifted() async {
     final a = _number(_reference);
     final b = _number(_target);
-    if (_imported == null) { setState(() => _error = 'Importez d’abord un fichier WAV.'); return; }
+    if (_imported == null) { setState(() => _error = 'Importez d’abord une musique.'); return; }
     if (a == null || b == null || !a.isFinite || !b.isFinite || a < 100 || a > 1000 || b < 100 || b > 1000) {
       setState(() => _error = 'Références d’accordage autorisées : 100 à 1 000 Hz.'); return;
     }
@@ -178,7 +206,7 @@ class _StudioPageState extends State<StudioPage> {
     const SizedBox(height: 10),
     const Text('Modifiez la hauteur musicale d’un extrait sans changer sa durée. Premier algorithme expérimental : de légers artefacts peuvent être audibles.', style: TextStyle(color: Colors.white70)),
     const SizedBox(height: 22),
-    OutlinedButton.icon(onPressed: _busy ? null : _importWav, icon: const Icon(Icons.folder_open), label: const Text('IMPORTER UN FICHIER WAV')),
+    OutlinedButton.icon(onPressed: _busy ? null : _importAudio, icon: const Icon(Icons.folder_open), label: const Text('IMPORTER UNE MUSIQUE')),
     const SizedBox(height: 12),
     Text(_filename == null ? 'Aucun fichier chargé' : '$_filename • ${_imported!.duration.toStringAsFixed(1)} s max.', style: const TextStyle(color: Color(0xff71fff0))),
     const SizedBox(height: 16),
@@ -195,7 +223,7 @@ class _StudioPageState extends State<StudioPage> {
     const SizedBox(height: 20), FilledButton.icon(onPressed: _busy ? null : (_playing ? _stop : _playShifted),
       icon: Icon(_playing ? Icons.stop : Icons.play_arrow), label: Text(_busy ? 'TRAITEMENT…' : (_playing ? 'ARRÊTER' : 'ÉCOUTER L’EXTRAIT'))),
     const SizedBox(height: 22),
-    const Text('V4 : WAV PCM 16 bits mono ou stéréo, 8–96 kHz. Aperçu limité aux 20 premières secondes et converti en mono. MP3, export et capture système prévus plus tard.', style: TextStyle(color: Colors.white54, fontSize: 12)),
+    const Text('V8 : MP3, FLAC, OGG, Opus, WAV, M4A et autres formats selon le décodeur disponible. Aperçu de 20 secondes, converti en mono. La lecture intégrale, la stéréo et l’export viendront ensuite.', style: TextStyle(color: Colors.white54, fontSize: 12)),
   ];
 }
 
