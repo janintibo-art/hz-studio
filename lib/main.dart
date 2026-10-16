@@ -1,9 +1,12 @@
 import 'dart:io';
+import 'dart:isolate';
 import 'dart:math' as math;
 import 'dart:typed_data';
 import 'package:audioplayers/audioplayers.dart';
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
+import 'audio_processing.dart';
 
 void main() => runApp(const HzStudio());
 
@@ -27,134 +30,173 @@ class StudioPage extends StatefulWidget {
 class _StudioPageState extends State<StudioPage> {
   final AudioPlayer _player = AudioPlayer();
   final TextEditingController _frequency = TextEditingController(text: '432');
+  final TextEditingController _reference = TextEditingController(text: '440');
+  final TextEditingController _target = TextEditingController(text: '432');
   double _volume = 0.25;
   String _wave = 'Sinusoïde';
   bool _playing = false;
   bool _schumann = false;
+  bool _busy = false;
+  int _tab = 0;
   String? _error;
+  String? _filename;
+  PcmAudio? _imported;
   int _generation = 0;
   final List<File> _tempFiles = [];
-
   static const presets = <(String, double, bool)>[
-    ('La 440', 440, false), ('La 432', 432, false),
-    ('174 Hz', 174, false), ('396 Hz', 396, false),
-    ('528 Hz', 528, false), ('639 Hz', 639, false),
-    ('741 Hz', 741, false), ('852 Hz', 852, false),
-    ('963 Hz', 963, false), ('Schumann 7,83 Hz', 7.83, true),
+    ('La 440', 440, false), ('La 432', 432, false), ('174 Hz', 174, false),
+    ('396 Hz', 396, false), ('528 Hz', 528, false), ('639 Hz', 639, false),
+    ('741 Hz', 741, false), ('852 Hz', 852, false), ('963 Hz', 963, false),
+    ('Schumann 7,83 Hz', 7.83, true),
   ];
 
   @override
   void dispose() {
     _generation++;
     _player.dispose();
-    _frequency.dispose();
+    _frequency.dispose(); _reference.dispose(); _target.dispose();
     for (final f in _tempFiles) { try { f.deleteSync(); } catch (_) {} }
     super.dispose();
   }
 
-  void _choose(double value, bool schumann) {
-    _frequency.text = value.toString().replaceAll('.', ',');
-    setState(() { _schumann = schumann; _error = null; });
-    if (_playing) _stop();
-  }
-
-  double? _parsedFrequency() => double.tryParse(_frequency.text.trim().replaceAll(',', '.'));
-
+  double? _number(TextEditingController c) => double.tryParse(c.text.trim().replaceAll(',', '.'));
   Future<void> _stop() async {
     _generation++;
     try { await _player.stop(); } catch (_) {}
     if (mounted) setState(() => _playing = false);
   }
-
-  Future<void> _start() async {
-    final freq = _parsedFrequency();
-    if (freq == null || !freq.isFinite || freq < 0.1 || freq > 15000) {
-      setState(() => _error = 'Entrez une fréquence entre 0,1 et 15 000 Hz.');
-      return;
+  void _choose(double freq, bool schumann) {
+    _frequency.text = freq.toString().replaceAll('.', ',');
+    setState(() { _schumann = schumann; _error = null; });
+    if (_playing) _stop();
+  }
+  Future<void> _playBytes(Uint8List wav, {bool loop = false}) async {
+    final gen = ++_generation;
+    await _player.stop();
+    final dir = await getTemporaryDirectory();
+    final file = File('${dir.path}/hzstudio_${DateTime.now().microsecondsSinceEpoch}.wav');
+    await file.writeAsBytes(wav, flush: true);
+    _tempFiles.add(file);
+    await _player.setReleaseMode(loop ? ReleaseMode.loop : ReleaseMode.stop);
+    if (!mounted || gen != _generation) return;
+    await _player.play(DeviceFileSource(file.path));
+    if (mounted && gen == _generation) setState(() => _playing = true);
+    if (_tempFiles.length > 4) {
+      final old = _tempFiles.removeAt(0);
+      try { await old.delete(); } catch (_) {}
     }
-    final generation = ++_generation;
-    setState(() { _error = null; _playing = false; });
+  }
+  Future<void> _generate() async {
+    final f = _number(_frequency);
+    if (f == null || !f.isFinite || f < 0.1 || f > 15000) {
+      setState(() => _error = 'Fréquence autorisée : 0,1 à 15 000 Hz.'); return;
+    }
+    setState(() { _error = null; _busy = true; });
     try {
-      await _player.stop();
-      // Un morceau PCM boucle en conservant la vitesse normale du lecteur.
-      final bytes = await Future<Uint8List>(() => makeWav(freq, _volume, _wave, _schumann));
-      if (!mounted || generation != _generation) return;
-      final dir = await getTemporaryDirectory();
-      final file = File('${dir.path}/hzstudio_$generation.wav');
-      await file.writeAsBytes(bytes, flush: true);
-      _tempFiles.add(file);
-      await _player.setReleaseMode(ReleaseMode.loop);
-      await _player.play(DeviceFileSource(file.path));
-      if (mounted && generation == _generation) setState(() => _playing = true);
-      if (_tempFiles.length > 3) {
-        final old = _tempFiles.removeAt(0);
-        try { await old.delete(); } catch (_) {}
-      }
-    } catch (e) {
-      if (mounted && generation == _generation) setState(() => _error = 'Lecture impossible : $e');
+      final wav = await Isolate.run(() => makeWav(f, _volume, _wave, _schumann));
+      if (mounted) await _playBytes(wav, loop: true);
+    } catch (e) { if (mounted) setState(() => _error = 'Lecture impossible : $e'); }
+    finally { if (mounted) setState(() => _busy = false); }
+  }
+  Future<void> _importWav() async {
+    await _stop();
+    try {
+      final pick = await FilePicker.platform.pickFiles(
+        type: FileType.custom, allowedExtensions: ['wav'], withData: true);
+      if (pick == null || pick.files.isEmpty) return;
+      final selected = pick.files.single;
+      if (selected.size > 35 * 1024 * 1024) throw const FormatException('Fichier supérieur à 35 Mo.');
+      final bytes = selected.bytes ?? (selected.path != null ? await File(selected.path!).readAsBytes() : null);
+      if (bytes == null) throw const FormatException('Lecture du fichier impossible.');
+      final pcm = await Isolate.run(() => readPcmWav(bytes));
+      if (mounted) setState(() { _imported = pcm; _filename = selected.name; _error = null; });
+    } catch (e) { if (mounted) setState(() => _error = '$e'); }
+  }
+  Future<void> _playShifted() async {
+    final a = _number(_reference);
+    final b = _number(_target);
+    if (_imported == null) { setState(() => _error = 'Importez d’abord un fichier WAV.'); return; }
+    if (a == null || b == null || !a.isFinite || !b.isFinite || a < 100 || a > 1000 || b < 100 || b > 1000) {
+      setState(() => _error = 'Références d’accordage autorisées : 100 à 1 000 Hz.'); return;
     }
+    final ratio = b / a;
+    if (ratio < .7 || ratio > 1.4) {
+      setState(() => _error = 'Écart trop important pour cet algorithme (70–140 %).'); return;
+    }
+    setState(() { _busy = true; _error = null; });
+    try {
+      final pcm = _imported!;
+      final audio = await Isolate.run(() => shiftPitch(pcm.samples, ratio, pcm.sampleRate));
+      final wav = await Isolate.run(() => encodePcmWav(audio, pcm.sampleRate));
+      if (mounted) await _playBytes(wav);
+    } catch (e) { if (mounted) setState(() => _error = 'Traitement impossible : $e'); }
+    finally { if (mounted) setState(() => _busy = false); }
   }
-
   @override
-  Widget build(BuildContext context) {
-    final f = _parsedFrequency();
+  Widget build(BuildContext context) => Scaffold(
+    appBar: AppBar(title: const Row(children: [Icon(Icons.graphic_eq, color: Color(0xff27ded6)), SizedBox(width: 10), Text('HZ STUDIO', style: TextStyle(fontWeight: FontWeight.w800, letterSpacing: 2))])),
+    bottomNavigationBar: NavigationBar(selectedIndex: _tab, onDestinationSelected: (i) { _stop(); setState(() { _tab = i; _error = null; }); },
+      destinations: const [NavigationDestination(icon: Icon(Icons.waves), label: 'Générateur'), NavigationDestination(icon: Icon(Icons.library_music), label: 'Lecteur')]),
+    body: SafeArea(child: Center(child: ConstrainedBox(constraints: const BoxConstraints(maxWidth: 760),
+      child: ListView(padding: const EdgeInsets.all(20), children: [
+        if (_tab == 0) ..._generatorWidgets() else ..._playerWidgets(),
+        if (_error != null) Padding(padding: const EdgeInsets.symmetric(vertical: 16), child: Text(_error!, style: const TextStyle(color: Colors.orangeAccent))),
+      ]))));
+
+  List<Widget> _generatorWidgets() {
+    final f = _number(_frequency);
     final label = f == null ? '—' : '${f.toStringAsFixed(f % 1 == 0 ? 0 : 2)} Hz';
-    return Scaffold(body: SafeArea(child: Center(child: ConstrainedBox(
-      constraints: const BoxConstraints(maxWidth: 760),
-      child: ListView(padding: const EdgeInsets.all(22), children: [
-        const Row(children: [Icon(Icons.graphic_eq, color: Color(0xff27ded6), size: 35),
-          SizedBox(width: 10), Text('HZ STUDIO', style: TextStyle(fontWeight: FontWeight.w900, fontSize: 26, letterSpacing: 3))]),
-        const SizedBox(height: 5),
-        const Text('Laboratoire de fréquences • Android & Windows', style: TextStyle(color: Colors.white60)),
-        const SizedBox(height: 25),
-        Container(padding: const EdgeInsets.all(24), decoration: BoxDecoration(
-          gradient: const LinearGradient(colors: [Color(0xff102e40), Color(0xff17152e)]),
-          borderRadius: BorderRadius.circular(24)), child: Column(children: [
-            const Text('FRÉQUENCE ACTIVE', style: TextStyle(color: Colors.white70, letterSpacing: 2)),
-            const SizedBox(height: 12),
-            FittedBox(child: Text(label, style: const TextStyle(fontSize: 58, color: Color(0xff71fff0), fontWeight: FontWeight.w900))),
-            const SizedBox(height: 12),
-            Text(_schumann ? 'Modulation Schumann sur porteuse audible de 220 Hz' : 'Générateur de signal audio',
-              textAlign: TextAlign.center, style: const TextStyle(color: Colors.white70)),
-            const SizedBox(height: 18),
-            Wrap(spacing: 10, children: [
-              FilledButton.icon(onPressed: _playing ? _stop : _start,
-                icon: Icon(_playing ? Icons.stop : Icons.play_arrow),
-                label: Text(_playing ? 'ARRÊTER' : 'ÉCOUTER')),
-            ]),
-          ])),
-        const SizedBox(height: 22),
-        TextField(controller: _frequency, keyboardType: const TextInputType.numberWithOptions(decimal: true),
-          decoration: const InputDecoration(labelText: 'Fréquence personnalisée (Hz)',
-            border: OutlineInputBorder(), prefixIcon: Icon(Icons.tune), helperText: 'De 0,1 à 15 000 Hz • virgule ou point'),
-          onChanged: (_) { if (_playing) _stop(); setState(() { _schumann = false; _error = null; }); }),
-        const SizedBox(height: 20),
-        const Text('PRÉRÉGLAGES', style: TextStyle(fontWeight: FontWeight.bold, letterSpacing: 1.5)),
-        const SizedBox(height: 10),
-        Wrap(spacing: 8, runSpacing: 6, children: [for (final p in presets)
-          ActionChip(label: Text(p.$1), onPressed: () => _choose(p.$2, p.$3))]),
-        const SizedBox(height: 23),
-        Row(children: [const Expanded(child: Text('Volume du générateur')),
-          Text('${(_volume * 100).round()} %')]),
-        Slider(value: _volume, min: 0, max: 0.6, onChanged: (v) {
-          setState(() => _volume = v); if (_playing) _stop();
-        }),
-        const SizedBox(height: 8),
-        DropdownButtonFormField<String>(initialValue: _wave,
-          decoration: const InputDecoration(labelText: 'Forme d’onde', border: OutlineInputBorder()),
-          items: ['Sinusoïde', 'Triangle', 'Carrée'].map((w) => DropdownMenuItem(value: w, child: Text(w))).toList(),
-          onChanged: (v) { if (v != null) { setState(() => _wave = v); if (_playing) _stop(); } }),
-        if (_error != null) Padding(padding: const EdgeInsets.only(top: 16),
-          child: Text(_error!, style: const TextStyle(color: Colors.orangeAccent))),
-        const SizedBox(height: 25),
-        const Text('V1 — Générateur fonctionnel. Lecture de fichiers avec changement de hauteur sans modification du tempo et capture audio des autres applications : étapes suivantes.',
-          style: TextStyle(color: Colors.white60, height: 1.45)),
-        const SizedBox(height: 10),
-        const Text('Commencez avec un volume faible. 7,83 Hz est ici une modulation audible, et non une reproduction directe des infrasons.',
-          style: TextStyle(color: Colors.white54, fontSize: 12)),
-      ]),
-    ))));
+    return [
+      const Text('Laboratoire de fréquences', style: TextStyle(color: Colors.white70)),
+      const SizedBox(height: 22),
+      Container(padding: const EdgeInsets.all(24), decoration: BoxDecoration(
+        gradient: const LinearGradient(colors: [Color(0xff102e40), Color(0xff17152e)]), borderRadius: BorderRadius.circular(24)),
+        child: Column(children: [
+          const Text('FRÉQUENCE ACTIVE', style: TextStyle(letterSpacing: 2, color: Colors.white70)),
+          const SizedBox(height: 18), FittedBox(child: Text(label, style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 58, color: Color(0xff71fff0)))),
+          const SizedBox(height: 16), Text(_schumann ? 'Modulation à 7,83 Hz sur porteuse audible de 220 Hz' : 'Générateur de signal audio', textAlign: TextAlign.center),
+          const SizedBox(height: 22), FilledButton.icon(onPressed: _busy ? null : (_playing ? _stop : _generate),
+            icon: Icon(_playing ? Icons.stop : Icons.play_arrow), label: Text(_busy ? 'PRÉPARATION…' : (_playing ? 'ARRÊTER' : 'ÉCOUTER'))),
+        ])),
+      const SizedBox(height: 22),
+      TextField(controller: _frequency, keyboardType: const TextInputType.numberWithOptions(decimal: true),
+        decoration: const InputDecoration(border: OutlineInputBorder(), labelText: 'Fréquence personnalisée (Hz)', helperText: '0,1 à 15 000 Hz'),
+        onChanged: (_) { if (_playing) _stop(); setState(() { _schumann = false; _error = null; }); }),
+      const SizedBox(height: 20), const Text('PRÉRÉGLAGES', style: TextStyle(fontWeight: FontWeight.bold, letterSpacing: 1.5)),
+      const SizedBox(height: 12), Wrap(spacing: 8, runSpacing: 8, children: [for (final p in presets) ActionChip(label: Text(p.$1), onPressed: () => _choose(p.$2, p.$3))]),
+      const SizedBox(height: 24), Row(children: [const Expanded(child: Text('Volume')), Text('${(_volume * 100).round()} %')]),
+      Slider(value: _volume, min: 0, max: .6, onChanged: (v) { setState(() => _volume = v); if (_playing) _stop(); }),
+      DropdownButtonFormField<String>(initialValue: _wave,
+        decoration: const InputDecoration(border: OutlineInputBorder(), labelText: 'Forme d’onde'),
+        items: ['Sinusoïde', 'Triangle', 'Carrée'].map((w) => DropdownMenuItem(value: w, child: Text(w))).toList(),
+        onChanged: (v) { if (v != null) { setState(() => _wave = v); if (_playing) _stop(); } }),
+      const SizedBox(height: 20), const Text('Commencez avec un volume faible. Le mode Schumann utilise une modulation audible, pas une émission directe d’infrasons.', style: TextStyle(color: Colors.white54, fontSize: 12)),
+    ];
   }
+  List<Widget> _playerWidgets() => [
+    const Text('LECTEUR ET ACCORDAGE', style: TextStyle(fontWeight: FontWeight.bold, letterSpacing: 1.5)),
+    const SizedBox(height: 10),
+    const Text('Modifiez la hauteur musicale d’un extrait sans changer sa durée. Premier algorithme expérimental : de légers artefacts peuvent être audibles.', style: TextStyle(color: Colors.white70)),
+    const SizedBox(height: 22),
+    OutlinedButton.icon(onPressed: _busy ? null : _importWav, icon: const Icon(Icons.folder_open), label: const Text('IMPORTER UN FICHIER WAV')),
+    const SizedBox(height: 12),
+    Text(_filename == null ? 'Aucun fichier chargé' : '$_filename • ${_imported!.duration.toStringAsFixed(1)} s max.', style: const TextStyle(color: Color(0xff71fff0))),
+    const SizedBox(height: 16),
+    const Text('ACCORDAGE (HZ)', style: TextStyle(letterSpacing: 1.5)),
+    const SizedBox(height: 12), Row(children: [
+      Expanded(child: TextField(controller: _reference, keyboardType: const TextInputType.numberWithOptions(decimal: true), decoration: const InputDecoration(border: OutlineInputBorder(), labelText: 'Source'))),
+      const Padding(padding: EdgeInsets.symmetric(horizontal: 8), child: Icon(Icons.arrow_forward)),
+      Expanded(child: TextField(controller: _target, keyboardType: const TextInputType.numberWithOptions(decimal: true), decoration: const InputDecoration(border: OutlineInputBorder(), labelText: 'Cible'))),
+    ]),
+    const SizedBox(height: 12), Wrap(spacing: 8, children: [
+      ActionChip(label: const Text('440 → 432'), onPressed: () { _reference.text = '440'; _target.text = '432'; setState(() {}); }),
+      ActionChip(label: const Text('432 → 440'), onPressed: () { _reference.text = '432'; _target.text = '440'; setState(() {}); }),
+    ]),
+    const SizedBox(height: 20), FilledButton.icon(onPressed: _busy ? null : (_playing ? _stop : _playShifted),
+      icon: Icon(_playing ? Icons.stop : Icons.play_arrow), label: Text(_busy ? 'TRAITEMENT…' : (_playing ? 'ARRÊTER' : 'ÉCOUTER L’EXTRAIT'))),
+    const SizedBox(height: 22),
+    const Text('V4 : WAV PCM 16 bits mono ou stéréo, 8–96 kHz. Aperçu limité aux 20 premières secondes et converti en mono. MP3, export et capture système prévus plus tard.', style: TextStyle(color: Colors.white54, fontSize: 12)),
+  ];
 }
 
 Uint8List makeWav(double frequency, double volume, String wave, bool schumann) {
