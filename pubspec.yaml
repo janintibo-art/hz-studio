@@ -1,7 +1,7 @@
 name: hz_studio
 description: Generateur de frequences et lecteur audio pour Android et Windows.
 publish_to: none
-version: 1.0.8+8
+version: 1.0.9+9
 environment:
   sdk: '>=3.6.0 <4.0.0'
 dependencies:
