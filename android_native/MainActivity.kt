@@ -1,5 +1,9 @@
 package com.example.hz_studio
 
+import android.content.ContentValues
+import android.os.Build
+import android.os.Environment
+import android.provider.MediaStore
 import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaFormat
@@ -16,20 +20,56 @@ import kotlin.concurrent.thread
 class MainActivity : FlutterActivity() {
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
-        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "hz_studio/audio_decode").setMethodCallHandler { call, result ->
-            if (call.method != "decodePreview") { result.notImplemented(); return@setMethodCallHandler }
-            val path = call.argument<String>("path")
-            if (path.isNullOrBlank()) { result.error("FILE", "Chemin manquant", null); return@setMethodCallHandler }
-            thread(name = "hz-decode") {
-                try {
-                    val out = File(cacheDir, "hz_import_${System.nanoTime()}.wav")
-                    decodePreview(path, out)
-                    Handler(Looper.getMainLooper()).post { result.success(out.absolutePath) }
-                } catch (e: Exception) {
-                    Handler(Looper.getMainLooper()).post { result.error("DECODER", e.message ?: "Décodage impossible", null) }
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "hz_studio/audio_decode")
+            .setMethodCallHandler { call, result ->
+                val path = call.argument<String>("path")
+                if (path.isNullOrBlank()) {
+                    result.error("FILE", "Chemin manquant", null)
+                    return@setMethodCallHandler
+                }
+                when (call.method) {
+                    "decodePreview" -> thread(name = "hz-decode") {
+                        try {
+                            val out = File(cacheDir, "hz_import_${System.nanoTime()}.wav")
+                            decodePreview(path, out)
+                            Handler(Looper.getMainLooper()).post { result.success(out.absolutePath) }
+                        } catch (e: Exception) {
+                            Handler(Looper.getMainLooper()).post {
+                                result.error("DECODER", e.message ?: "Décodage impossible", null)
+                            }
+                        }
+                    }
+                    "saveWav" -> thread(name = "hz-save") {
+                        try {
+                            val name = "hz_studio_${System.currentTimeMillis()}.wav"
+                            val values = ContentValues().apply {
+                                put(MediaStore.Downloads.DISPLAY_NAME, name)
+                                put(MediaStore.Downloads.MIME_TYPE, "audio/wav")
+                                if (Build.VERSION.SDK_INT >= 29) {
+                                    put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
+                                }
+                            }
+                            require(Build.VERSION.SDK_INT >= 29) { "Export Android 10 ou plus requis" }
+                            val uri = contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                                ?: error("Impossible de créer le WAV")
+                            try {
+                                contentResolver.openOutputStream(uri)?.use { dst ->
+                                    File(path).inputStream().use { src -> src.copyTo(dst) }
+                                } ?: error("Impossible d'ouvrir le fichier cible")
+                            } catch (e: Exception) {
+                                contentResolver.delete(uri, null, null)
+                                throw e
+                            }
+                            Handler(Looper.getMainLooper()).post { result.success(name) }
+                        } catch (e: Exception) {
+                            Handler(Looper.getMainLooper()).post {
+                                result.error("EXPORT", e.message ?: "Export impossible", null)
+                            }
+                        }
+                    }
+                    else -> result.notImplemented()
                 }
             }
-        }
     }
 
     private fun decodePreview(path: String, output: File) {
@@ -59,19 +99,17 @@ class MainActivity : FlutterActivity() {
             var endInput = false
             var endOutput = false
             var bytesWritten = 0L
-            val maxDurationUs = 20_000_000L
             RandomAccessFile(output, "rw").use { wav ->
                 wav.setLength(0)
                 wav.write(ByteArray(44))
-                var spins = 0
-                while (!endOutput && spins++ < 200000) {
+                while (!endOutput) {
                     if (!endInput) {
                         val inputIndex = decoder.dequeueInputBuffer(10000)
                         if (inputIndex >= 0) {
                             val input = decoder.getInputBuffer(inputIndex)!!
                             input.clear()
                             val at = extractor.sampleTime
-                            if (at < 0 || at >= maxDurationUs) {
+                            if (at < 0) {
                                 decoder.queueInputBuffer(inputIndex, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
                                 endInput = true
                             } else {
@@ -98,22 +136,24 @@ class MainActivity : FlutterActivity() {
                         }
                         else -> if (outputIndex >= 0) {
                             val buffer = decoder.getOutputBuffer(outputIndex)!!
-                            if (info.size > 0 && info.presentationTimeUs < maxDurationUs) {
+                            if (info.size > 0) {
                                 buffer.position(info.offset)
                                 buffer.limit(info.offset + info.size)
                                 buffer.order(ByteOrder.LITTLE_ENDIAN)
                                 val frameBytes = channels * 2
                                 val frames = info.size / frameBytes
                                 for (i in 0 until frames) {
-                                    var sum = 0
-                                    for (ch in 0 until channels) sum += buffer.short.toInt()
-                                    val mono = (sum / channels).toShort().toInt()
-                                    wav.write(mono and 0xff)
-                                    wav.write((mono ushr 8) and 0xff)
-                                    bytesWritten += 2
+                                    for (ch in 0 until channels) {
+                                        val sample = buffer.short.toInt()
+                                        if (ch < 2) {
+                                            wav.write(sample and 0xff)
+                                            wav.write((sample ushr 8) and 0xff)
+                                            bytesWritten += 2
+                                        }
+                                    }
                                 }
                             }
-                            endOutput = info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0 || info.presentationTimeUs >= maxDurationUs
+                            endOutput = info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0
                             decoder.releaseOutputBuffer(outputIndex, false)
                         }
                     }
@@ -123,8 +163,8 @@ class MainActivity : FlutterActivity() {
                 fun writeLE16(v: Int) { wav.write(v and 255); wav.write((v ushr 8) and 255) }
                 fun writeLE32(v: Long) { repeat(4) { wav.write(((v ushr (8 * it)) and 255).toInt()) } }
                 wav.writeBytes("RIFF"); writeLE32(bytesWritten + 36); wav.writeBytes("WAVEfmt ")
-                writeLE32(16); writeLE16(1); writeLE16(1); writeLE32(sampleRate.toLong()); writeLE32((sampleRate * 2).toLong())
-                writeLE16(2); writeLE16(16); wav.writeBytes("data"); writeLE32(bytesWritten)
+                writeLE32(16); writeLE16(1); writeLE16(minOf(channels, 2)); writeLE32(sampleRate.toLong()); writeLE32((sampleRate * minOf(channels, 2) * 2).toLong())
+                writeLE16(minOf(channels, 2) * 2); writeLE16(16); wav.writeBytes("data"); writeLE32(bytesWritten)
             }
         } finally {
             try { codec?.stop() } catch (_: Exception) {}

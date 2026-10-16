@@ -11,6 +11,7 @@ import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 
 import 'audio_processing.dart';
+import 'full_track.dart';
 import 'studio_visuals.dart';
 
 void main() => runApp(const HzStudio());
@@ -86,7 +87,10 @@ class _StudioPageState extends State<StudioPage> {
   String? _error;
   String? _filename;
   PcmAudio? _imported;
-  Uint8List? _processedWav;
+  File? _processedTrack;
+  String? _decodedTrack;
+  double _trackDuration = 0;
+  int _trackChannels = 1;
   Duration _position = Duration.zero;
   Duration _duration = Duration.zero;
   bool _paused = false;
@@ -142,6 +146,9 @@ class _StudioPageState extends State<StudioPage> {
         f.deleteSync();
       } catch (_) {}
     }
+    for (final path in [_decodedTrack, _processedTrack?.path]) {
+      if (path != null) { try { File(path).deleteSync(); } catch (_) {} }
+    }
     super.dispose();
   }
 
@@ -182,19 +189,30 @@ class _StudioPageState extends State<StudioPage> {
   }
 
   Future<void> _saveProcessed() async {
-    final data = _processedWav;
-    if (data == null) return;
+    final file = _processedTrack;
+    if (file == null || !await file.exists()) return;
     try {
+      if (Platform.isAndroid) {
+        const channel = MethodChannel('hz_studio/audio_decode');
+        await channel.invokeMethod<String>('saveWav', {'path': file.path});
+        if (mounted) ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('WAV enregistré dans Téléchargements.')),
+        );
+        return;
+      }
       final target = await FilePicker.platform.saveFile(
-        dialogTitle: 'Exporter l’extrait transformé',
+        dialogTitle: 'Exporter le morceau transformé',
         fileName: 'hz_studio_accordage.wav',
         type: FileType.custom,
         allowedExtensions: ['wav'],
-        bytes: data,
       );
-      if (target != null && mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Extrait WAV exporté.')),
+      if (target != null) {
+        // Android peut utiliser une URI de document : file_picker ne fournit
+        // pas toujours un chemin ordinaire. La copie est donc réservée aux
+        // destinations accessibles en écriture via dart:io.
+        await file.copy(target);
+        if (mounted) ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Morceau WAV exporté.')),
         );
       }
     } catch (e) {
@@ -261,60 +279,25 @@ class _StudioPageState extends State<StudioPage> {
     }
   }
 
-  Future<Uint8List> _decodeSelectedAudio(String path) async {
+  Future<String> _decodeSelectedAudio(String path) async {
     if (Platform.isAndroid) {
       const channel = MethodChannel('hz_studio/audio_decode');
-      final wavPath = await channel
-          .invokeMethod<String>('decodePreview', {'path': path});
-      if (wavPath == null) {
-        throw const FormatException('Décodage Android indisponible.');
-      }
-      final file = File(wavPath);
-      try {
-        return await file.readAsBytes();
-      } finally {
-        try {
-          await file.delete();
-        } catch (_) {}
-      }
+      final result = await channel.invokeMethod<String>('decodePreview', {'path': path});
+      if (result == null) throw const FormatException('Décodage Android indisponible.');
+      return result;
     }
     if (Platform.isWindows) {
-      final exe = File(
-          '${File(Platform.resolvedExecutable).parent.path}\\ffmpeg.exe');
-      if (!await exe.exists()) {
-        throw const FormatException('ffmpeg.exe absent du dossier Windows.');
-      }
+      final exe = File('${File(Platform.resolvedExecutable).parent.path}\\ffmpeg.exe');
+      if (!await exe.exists()) throw const FormatException('ffmpeg.exe absent du dossier Windows.');
       final dir = await getTemporaryDirectory();
-      final output = File(
-        '${dir.path}\\hz_decode_${DateTime.now().microsecondsSinceEpoch}.wav',
-      );
-      try {
-        final process = await Process.run(exe.path, [
-          '-hide_banner',
-          '-loglevel',
-          'error',
-          '-nostdin',
-          '-y',
-          '-i',
-          path,
-          '-t',
-          '20',
-          '-vn',
-          '-ac',
-          '1',
-          '-ar',
-          '44100',
-          '-c:a',
-          'pcm_s16le',
-          output.path,
-        ]);
-        if (process.exitCode != 0) {
-          throw FormatException('FFmpeg : ${process.stderr}');
-        }
-        return await output.readAsBytes();
-      } finally {
-        if (await output.exists()) await output.delete();
-      }
+      final output = File('${dir.path}\\hz_decode_${DateTime.now().microsecondsSinceEpoch}.wav');
+      final process = await Process.run(exe.path, [
+        '-hide_banner', '-loglevel', 'error', '-nostdin', '-y',
+        '-i', path, '-vn', '-ac', '2', '-ar', '44100',
+        '-c:a', 'pcm_s16le', output.path,
+      ]);
+      if (process.exitCode != 0) throw FormatException('FFmpeg : ${process.stderr}');
+      return output.path;
     }
     throw const FormatException('Plateforme non prise en charge.');
   }
@@ -355,13 +338,20 @@ class _StudioPageState extends State<StudioPage> {
           'Impossible de lire le chemin du fichier.',
         );
       }
-      final bytes = await _decodeSelectedAudio(selected.path!);
-      final pcm = await Isolate.run(() => readPcmWav(bytes));
+      final decoded = await _decodeSelectedAudio(selected.path!);
+      final info = await inspectWav(decoded);
+      final pcm = await readPreviewFromFile(decoded);
+      if (_decodedTrack != null && _decodedTrack != decoded) {
+        try { await File(_decodedTrack!).delete(); } catch (_) {}
+      }
       if (mounted) {
         setState(() {
           _imported = pcm;
+          _decodedTrack = decoded;
+          _trackDuration = info.duration;
+          _trackChannels = info.channels;
           _filename = selected.name;
-          _processedWav = null;
+          _processedTrack = null;
           _error = null;
         });
       }
@@ -377,7 +367,7 @@ class _StudioPageState extends State<StudioPage> {
   Future<void> _playShifted() async {
     final a = _number(_reference);
     final b = _number(_target);
-    if (_imported == null) {
+    if (_decodedTrack == null) {
       setState(() => _error = 'Importez d’abord une musique.');
       return;
     }
@@ -406,14 +396,20 @@ class _StudioPageState extends State<StudioPage> {
       _error = null;
     });
     try {
-      final pcm = _imported!;
-      final audio = await Isolate.run(
-        () => shiftPitch(pcm.samples, ratio, pcm.sampleRate),
-      );
-      final wav = await Isolate.run(() => encodePcmWav(audio, pcm.sampleRate));
+      final dir = await getTemporaryDirectory();
+      final path = '${dir.path}/hz_processed_${DateTime.now().microsecondsSinceEpoch}.wav';
+      final source = _decodedTrack!;
+      await Isolate.run(() => convertWholeWav(source, path, ratio));
       if (mounted) {
-        setState(() => _processedWav = wav);
-        await _playBytes(wav);
+        _processedTrack = File(path);
+        _tempFiles.add(_processedTrack!);
+        await _player.stop();
+        await _player.setReleaseMode(ReleaseMode.stop);
+        await _player.play(DeviceFileSource(path));
+        setState(() {
+          _playing = true;
+          _paused = false;
+        });
       }
     } catch (e) {
       if (mounted) setState(() => _error = 'Traitement impossible : $e');
@@ -715,7 +711,7 @@ class _StudioPageState extends State<StudioPage> {
         value: _filename ?? 'Aucun fichier',
         subtitle: _filename == null
             ? 'Importe une musique pour la traiter sans changer sa durée.'
-            : 'Aperçu importé : ${_imported?.duration.toStringAsFixed(1) ?? '0'} s • formats multiples',
+            : 'Durée : ${_trackDuration.toStringAsFixed(1)} s • ${_trackChannels == 2 ? 'STÉRÉO' : 'MONO'} • aperçu visuel 20 s',
         action: OutlinedButton.icon(
           onPressed: _busy ? null : _importAudio,
           icon: const Icon(Icons.folder_open),
@@ -790,7 +786,7 @@ class _StudioPageState extends State<StudioPage> {
                       labelText: 'Source',
                       prefixIcon: Icon(Icons.call_made),
                     ),
-                    onChanged: (_) => setState(() => _processedWav = null),
+                    onChanged: (_) => setState(() => _processedTrack = null),
                   ),
                 ),
                 const Padding(
@@ -807,7 +803,7 @@ class _StudioPageState extends State<StudioPage> {
                       labelText: 'Cible',
                       prefixIcon: Icon(Icons.call_received),
                     ),
-                    onChanged: (_) => setState(() => _processedWav = null),
+                    onChanged: (_) => setState(() => _processedTrack = null),
                   ),
                 ),
               ],
@@ -822,7 +818,7 @@ class _StudioPageState extends State<StudioPage> {
                   onPressed: () {
                     _reference.text = '440';
                     _target.text = '432';
-                    setState(() => _processedWav = null);
+                    setState(() => _processedTrack = null);
                   },
                 ),
                 ActionChip(
@@ -830,7 +826,7 @@ class _StudioPageState extends State<StudioPage> {
                   onPressed: () {
                     _reference.text = '432';
                     _target.text = '440';
-                    setState(() => _processedWav = null);
+                    setState(() => _processedTrack = null);
                   },
                 ),
                 ActionChip(
@@ -853,7 +849,7 @@ class _StudioPageState extends State<StudioPage> {
                 onPressed: _busy ? null : (_playing ? _stop : _playShifted),
                 icon: Icon(_playing ? Icons.stop : Icons.play_arrow),
                 label: Text(
-                  _busy ? 'TRAITEMENT…' : (_playing ? 'ARRÊTER' : 'ÉCOUTER L’EXTRAIT'),
+                  _busy ? 'TRAITEMENT…' : (_playing ? 'ARRÊTER' : 'TRAITER ET ÉCOUTER'),
                 ),
               ),
             ),
@@ -861,9 +857,9 @@ class _StudioPageState extends State<StudioPage> {
             SizedBox(
               width: double.infinity,
               child: OutlinedButton.icon(
-                onPressed: _processedWav == null || _busy ? null : _saveProcessed,
+                onPressed: _processedTrack == null || _busy ? null : _saveProcessed,
                 icon: const Icon(Icons.save_alt),
-                label: const Text('EXPORTER L’EXTRAIT EN WAV'),
+                label: const Text('EXPORTER LE MORCEAU EN WAV'),
               ),
             ),
           ],
@@ -871,7 +867,7 @@ class _StudioPageState extends State<StudioPage> {
       ),
       const SizedBox(height: 18),
       _notePanel(
-        'V10 : MP3, FLAC, OGG, Opus, WAV, M4A et autres formats selon le décodeur disponible. Traitement et export WAV limités aux 20 premières secondes, en mono. La lecture intégrale et la stéréo viendront ensuite.',
+        'V11 : morceau entier traité par blocs en mono ou stéréo (selon la source et le décodeur), durée conservée. Traitement de hauteur expérimental avec artefacts possibles. Courbe limitée aux 20 premières secondes. Export WAV 16 bits.',
       ),
     ];
   }
