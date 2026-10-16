@@ -1,4 +1,4 @@
-name: HZ Studio - V8 Multiformat et Release
+name: HZ Studio - Android Windows Live Audio Release
 on:
   push:
     tags: ['v*']
@@ -35,11 +35,8 @@ jobs:
         run: |
           plugin_gradle=$(find "$HOME/.pub-cache/hosted/pub.dev" -maxdepth 3 -path '*/file_picker-*/android/build.gradle' -print -quit)
           if [ -z "$plugin_gradle" ]; then echo 'file_picker Android Gradle file not found'; exit 1; fi
-          echo "Patching: $plugin_gradle"
-          grep -n 'compileSdk' "$plugin_gradle"
           sed -i -E 's/compileSdk[[:space:]]+34/compileSdk 36/' "$plugin_gradle"
           grep -Eq 'compileSdk[[:space:]]+36' "$plugin_gradle" || { echo 'compileSdk 36 not set'; exit 1; }
-          grep -n 'compileSdk' "$plugin_gradle"
       - run: flutter analyze --no-fatal-infos
       - run: flutter test
       - run: flutter build apk --release
@@ -74,6 +71,16 @@ jobs:
           Copy-Item $ffmpeg.FullName 'build/windows/x64/runner/Release/ffmpeg.exe'
           $license = Get-ChildItem -Path ffmpeg-portable -Filter LICENSE -Recurse | Select-Object -First 1
           if ($license) { Copy-Item $license.FullName 'build/windows/x64/runner/Release/FFMPEG-LICENSE.txt' }
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Build Windows Live Audio companion
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pyinstaller numpy soundcard sounddevice pedalboard
+          python -m PyInstaller --onefile --name hz_live_bridge --collect-all pedalboard --collect-all soundcard windows_live/live_bridge.py
+          Copy-Item 'dist/hz_live_bridge.exe' 'build/windows/x64/runner/Release/hz_live_bridge.exe'
       - name: Package EXE and dependencies
         shell: pwsh
         run: Compress-Archive -Path 'build/windows/x64/runner/Release/*' -DestinationPath 'hz_studio_windows.zip' -Force
@@ -97,4 +104,4 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" dist/hz_studio_android.apk dist/hz_studio_windows.zip --title "HZ Studio ${GITHUB_REF_NAME}" --notes "Android APK et Windows EXE (dans le ZIP avec ses DLL). Generateur de frequences et lecteur multiformat en aperçu de 20 secondes. FFmpeg Windows embarque." --latest
+          gh release create "${GITHUB_REF_NAME}" dist/hz_studio_android.apk dist/hz_studio_windows.zip --title "HZ Studio ${GITHUB_REF_NAME}" --notes "Android et Windows. V12: prototype Windows Live Audio (sortie distincte obligatoire). Le traitement Live n'est pas disponible sur Android." --latest

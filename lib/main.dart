@@ -12,6 +12,7 @@ import 'package:path_provider/path_provider.dart';
 
 import 'audio_processing.dart';
 import 'full_track.dart';
+import 'live_audio.dart';
 import 'studio_visuals.dart';
 
 void main() => runApp(const HzStudio());
@@ -439,7 +440,7 @@ class _StudioPageState extends State<StudioPage> {
                 children: [
                   _buildHeader(),
                   const SizedBox(height: 20),
-                  if (_tab == 0) ..._generatorWidgets() else ..._playerWidgets(),
+                  if (_tab == 0) ..._generatorWidgets() else if (_tab == 1) ..._playerWidgets() else ...[const LiveAudioPanel()],
                   if (_error != null) ...[
                     const SizedBox(height: 16),
                     _errorPanel(_error!),
@@ -474,6 +475,10 @@ class _StudioPageState extends State<StudioPage> {
               NavigationDestination(
                 icon: Icon(Icons.library_music),
                 label: 'Lecteur',
+              ),
+              NavigationDestination(
+                icon: Icon(Icons.settings_input_antenna),
+                label: 'Live Audio',
               ),
             ],
           ),
@@ -530,7 +535,9 @@ class _StudioPageState extends State<StudioPage> {
                 Text(
                   _tab == 0
                       ? 'Générateur audio • fréquence, modulation et préréglages'
-                      : 'Lecteur audio • import, accordage et aperçu du signal',
+                      : _tab == 1
+                          ? 'Lecteur audio • import, accordage et aperçu du signal'
+                          : 'Live Audio • traitement en direct sur Windows',
                   style: const TextStyle(
                     color: Color(0xff9dc0c8),
                     fontSize: 13,
