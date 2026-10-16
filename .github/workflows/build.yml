@@ -20,6 +20,11 @@ jobs:
           cache: true
       - name: Generate Android platform
         run: flutter create --platforms=android --project-name hz_studio .
+      - name: Set Android compile SDK 36
+        run: |
+          grep -q 'compileSdk = flutter.compileSdkVersion' android/app/build.gradle.kts
+          sed -i 's/compileSdk = flutter.compileSdkVersion/compileSdk = 36/' android/app/build.gradle.kts
+          grep -q 'compileSdk = 36' android/app/build.gradle.kts
       - run: flutter pub get
       - run: flutter analyze --no-fatal-infos
       - run: flutter test
@@ -68,4 +73,4 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" dist/hz_studio_android.apk dist/hz_studio_windows.zip --title "HZ Studio ${GITHUB_REF_NAME}" --notes "Android APK et Windows EXE (dans le ZIP avec ses DLL). Générateur de fréquences; le traitement global du son n'est pas encore intégré." --latest
+          gh release create "${GITHUB_REF_NAME}" dist/hz_studio_android.apk dist/hz_studio_windows.zip --title "HZ Studio ${GITHUB_REF_NAME}" --notes "Android APK et Windows EXE (dans le ZIP avec ses DLL). Generateur de frequences et lecteur WAV experimental." --latest
