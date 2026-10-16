@@ -141,7 +141,7 @@ class _StudioPageState extends State<StudioPage> {
       child: ListView(padding: const EdgeInsets.all(20), children: [
         if (_tab == 0) ..._generatorWidgets() else ..._playerWidgets(),
         if (_error != null) Padding(padding: const EdgeInsets.symmetric(vertical: 16), child: Text(_error!, style: const TextStyle(color: Colors.orangeAccent))),
-      ]))));
+      ])))));
 
   List<Widget> _generatorWidgets() {
     final f = _number(_frequency);
