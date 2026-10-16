@@ -1,9 +1,10 @@
-name: Build HZ Studio APK and Windows
+name: HZ Studio - APK Windows et Release
 on:
   push:
+    tags: ['v*']
   workflow_dispatch:
 permissions:
-  contents: read
+  contents: write
 jobs:
   android:
     runs-on: ubuntu-latest
@@ -17,16 +18,19 @@ jobs:
         with:
           channel: stable
           cache: true
-      - name: Generate Android platform scaffolding
+      - name: Generate Android platform
         run: flutter create --platforms=android --project-name hz_studio .
       - run: flutter pub get
       - run: flutter analyze --no-fatal-infos
       - run: flutter test
       - run: flutter build apk --release
+      - name: Name the APK
+        run: cp build/app/outputs/flutter-apk/app-release.apk hz_studio_android.apk
       - uses: actions/upload-artifact@v4
         with:
-          name: hz_studio_v1_apk
-          path: build/app/outputs/flutter-apk/app-release.apk
+          name: hz-studio-android
+          path: hz_studio_android.apk
+          if-no-files-found: error
   windows:
     runs-on: windows-latest
     steps:
@@ -35,13 +39,33 @@ jobs:
         with:
           channel: stable
           cache: true
-      - name: Generate Windows platform scaffolding
+      - name: Generate Windows platform
         run: flutter create --platforms=windows --project-name hz_studio .
       - run: flutter pub get
       - run: flutter analyze --no-fatal-infos
       - run: flutter test
       - run: flutter build windows --release
+      - name: Package EXE and dependencies
+        shell: pwsh
+        run: Compress-Archive -Path 'build/windows/x64/runner/Release/*' -DestinationPath 'hz_studio_windows.zip' -Force
       - uses: actions/upload-artifact@v4
         with:
-          name: hz_studio_v1_windows
-          path: build/windows/x64/runner/Release/**
+          name: hz-studio-windows
+          path: hz_studio_windows.zip
+          if-no-files-found: error
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [android, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: hz-studio-*
+          merge-multiple: true
+          path: dist
+      - name: Publish release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" dist/hz_studio_android.apk dist/hz_studio_windows.zip --title "HZ Studio ${GITHUB_REF_NAME}" --notes "Android APK et Windows EXE (dans le ZIP avec ses DLL). Générateur de fréquences; le traitement global du son n'est pas encore intégré." --latest
